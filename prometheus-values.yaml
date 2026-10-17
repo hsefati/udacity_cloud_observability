@@ -1,0 +1,6 @@
+grafana:
+  additionalDataSources:
+  - name: Jaeger
+    type: jaeger
+    access: proxy
+    url: http://simplest-query.observability.svc.cluster.local:16686
