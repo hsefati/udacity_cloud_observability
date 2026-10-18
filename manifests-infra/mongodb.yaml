@@ -1,0 +1,49 @@
+# manifests-infra/mongodb.yaml
+# Lightweight, modern MongoDB instance for the backend service.
+# Replaces the deprecated 2020 mongodb-kubernetes-operator (apiextensions.k8s.io/v1beta1).
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example-mongodb
+  namespace: default
+  labels:
+    app: example-mongodb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: example-mongodb
+  template:
+    metadata:
+      labels:
+        app: example-mongodb
+    spec:
+      containers:
+      - name: mongodb
+        image: mongo:4.4
+        ports:
+        - containerPort: 27017
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: example-mongodb-svc
+  namespace: default
+  labels:
+    app: example-mongodb
+spec:
+  selector:
+    app: example-mongodb
+  ports:
+  - port: 27017
+    targetPort: 27017
+    name: mongodb
+

@@ -14,6 +14,7 @@ A clean, self-contained Kubernetes observability setup based on a local [kind](h
 | **Jaeger instance** | `simplest` (all-in-one) | Lightweight all-in-one tracing backend (query, collector, UI) with in-memory storage |
 | **cert-manager** | latest (Jetstack chart) | Issues TLS certificates required by the Jaeger Operator admission webhook |
 | **ingress-nginx** | kind provider manifest | Ingress controller routing host domain traffic to cluster services |
+| **MongoDB** | `4.4` (standalone) | Database backing the backend service (`example-mongodb-svc`) |
 
 ---
 
@@ -25,6 +26,7 @@ A clean, self-contained Kubernetes observability setup based on a local [kind](h
 | `cert-manager` | cert-manager controller, webhook, cainjector | Manages internal CAs and TLS certificates for Kubernetes webhooks |
 | `monitoring` | Prometheus, Alertmanager, Grafana | Metrics collection, evaluation, alerting, and visualization |
 | `observability` | jaeger-operator, Jaeger `simplest` instance | Distributed trace ingestion, storage, search, and trace visualization UI |
+| `default` | MongoDB, Application services | Runs `frontend`, `backend`, `trial`, and `example-mongodb-svc` |
 
 ---
 
@@ -35,9 +37,12 @@ A clean, self-contained Kubernetes observability setup based on a local [kind](h
 | `http://grafana.local` | `prometheus-grafana` | `monitoring` | `80` | Metrics dashboards and unified trace viewer |
 | `http://prometheus.local` | `prometheus-kube-prometheus-prometheus` | `monitoring` | `9090` | Prometheus web UI, metrics browser, and targets |
 | `http://jaeger.local` | `simplest-query` | `observability` | `16686` | Jaeger distributed tracing search and timeline UI |
+| `http://frontend.local` | `frontend-service` | `default` | `8080` | Application frontend web UI |
+| `http://trial.local` | `trial-service` | `default` | `8080` | Trial service (error & tracing generator) |
+| `http://backend.local` | `backend-service` | `default` | `8080` | Application backend API |
 
 > [!NOTE]
-> The commands below provide a verified, reproducible environment. If any step encounters an issue, consult the **Troubleshooting** section at the bottom of this document.
+> The commands below provide a verified, reproducible environment. If you already have the cluster running, see the notes in each section or run the specific upgrade/apply commands.
 
 ---
 
@@ -193,19 +198,33 @@ grafana:
     type: jaeger                                                          # Data source plugin type
     access: proxy                                                         # Proxy queries through Grafana backend
     url: http://simplest-query.observability.svc.cluster.local:16686      # Cluster-internal DNS to Jaeger Query
+
+prometheus:
+  prometheusSpec:
+    # Setting these to false ensures Prometheus Operator scrapes ServiceMonitors
+    # and PodMonitors across ALL namespaces (not just the monitoring namespace).
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
 ```
 
 Deploy the Prometheus & Grafana stack:
 
 ```bash
-# 1. Create the dedicated monitoring namespace
-kubectl create namespace monitoring
+# 1. Create the dedicated monitoring namespace (if not already created)
+kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
 
-# 2. Install kube-prometheus-stack using our custom values file
+# 2a. Fresh Install: Install kube-prometheus-stack using our custom values file
 helm install prometheus prometheus-community/kube-prometheus-stack \
   --version 91.9.0 \
   -n monitoring \
   -f prometheus-values.yaml
+
+# 2b. Existing Cluster: If already installed, upgrade the release to apply the new values:
+# helm upgrade prometheus prometheus-community/kube-prometheus-stack \
+#   --version 91.9.0 \
+#   -n monitoring \
+#   -f prometheus-values.yaml
 
 # 3. Check deployment status of all monitoring components
 kubectl -n monitoring get pods
@@ -336,7 +355,7 @@ Save as `ingress.yaml`:
 
 ```yaml
 # ingress.yaml
-# Ingress routing rules for Monitoring and Observability suites
+# Ingress routing rules for Monitoring, Observability, and Application suites
 
 # 1. Ingress for services in the 'monitoring' namespace
 apiVersion: networking.k8s.io/v1
@@ -396,12 +415,58 @@ spec:
             name: simplest-query
             port:
               number: 16686
+---
+# 3. Ingress for applications in the 'default' namespace
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: apps-ingress
+  namespace: default
+  annotations:
+    # Disable automatic redirect to HTTPS for local HTTP development
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+  # Route frontend.local -> frontend-service:8080
+  - host: frontend.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend-service
+            port:
+              number: 8080
+  # Route trial.local -> trial-service:8080
+  - host: trial.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: trial-service
+            port:
+              number: 8080
+  # Route backend.local -> backend-service:8080
+  - host: backend.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: backend-service
+            port:
+              number: 8080
 ```
 
 Apply the ingress rules:
 
 ```bash
-# 1. Apply both Ingress resources to the cluster
+# 1. Apply all Ingress resources to the cluster
 kubectl apply -f ingress.yaml
 
 # 2. Inspect Ingress resources across all namespaces to verify hosts and backends
@@ -411,21 +476,44 @@ kubectl get ingress -A
 ### Configure Local Hostnames (`/etc/hosts`)
 
 ### What it does:
-Maps `grafana.local`, `prometheus.local`, and `jaeger.local` to loopback address `127.0.0.1` so that your web browser resolves these domains to your local host (where kind's port 80 mapping listens).
+Maps `grafana.local`, `prometheus.local`, `jaeger.local`, `frontend.local`, `trial.local`, and `backend.local` to loopback address `127.0.0.1` so that your web browser resolves these domains to your local host (where kind's port 80 mapping listens).
 
 ### Why it is needed:
-Operating system DNS resolvers do not recognize `.local` domains out of the box. Adding static entries to `/etc/hosts` resolves requests locally without requiring an external DNS server.
+Operating system DNS resolvers do not recognize custom `.local` domains out of the box. Adding static entries to `/etc/hosts` resolves requests locally without requiring an external DNS server.
 
 Add the following line to `/etc/hosts` (Linux / macOS / WSL) or `C:\Windows\System32\drivers\etc\hosts` (Windows):
 
 ```text
-127.0.0.1 grafana.local prometheus.local jaeger.local
+127.0.0.1 grafana.local prometheus.local jaeger.local frontend.local trial.local backend.local
 ```
 
 Quick command for Linux / WSL:
 ```bash
 # Append host entries to /etc/hosts (requires sudo)
-echo "127.0.0.1 grafana.local prometheus.local jaeger.local" | sudo tee -a /etc/hosts
+echo "127.0.0.1 grafana.local prometheus.local jaeger.local frontend.local trial.local backend.local" | sudo tee -a /etc/hosts
+```
+
+---
+
+## 8b. Application Infrastructure Support (MongoDB & ServiceMonitors)
+
+### What it does:
+1. Deploys a lightweight, standard MongoDB instance (`example-mongodb-svc`) in the `default` namespace.
+2. Applies a `ServiceMonitor` instructing the Prometheus Operator to scrape `/metrics` from any service labeled `app: frontend`, `app: backend`, or `app: trial`.
+
+### Why it is needed:
+- **MongoDB**: The `backend` application has a hardcoded dependency on `mongodb://example-mongodb-svc.default.svc.cluster.local:27017/example-mongodb`. The course starter repo provided an old 2020 MongoDB Operator with `apiextensions.k8s.io/v1beta1`, which fails on Kubernetes v1.36. Deploying a clean, standalone MongoDB service ensures database connectivity before the application runs.
+- **ServiceMonitor**: Connects application `/metrics` endpoints automatically to Prometheus for dashboard visualization.
+
+```bash
+# 1. Deploy the standalone MongoDB infrastructure
+kubectl apply -f manifests-infra/mongodb.yaml
+
+# 2. Wait for MongoDB to become ready
+kubectl wait --for=condition=ready pod -l app=example-mongodb --timeout=120s
+
+# 3. Apply the ServiceMonitor for Prometheus scraping
+kubectl apply -f manifests-infra/app-service-monitors.yaml
 ```
 
 ---

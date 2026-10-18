@@ -1,0 +1,23 @@
+# manifests-infra/app-service-monitors.yaml
+# ServiceMonitor resource instructing Prometheus Operator to automatically scrape
+# Prometheus metrics (/metrics) from the application services in the default namespace.
+
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: app-services-monitor
+  namespace: default
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchExpressions:
+    - key: app
+      operator: In
+      values: [frontend, backend, trial]
+  endpoints:
+  - port: web
+    path: /metrics
+    interval: 15s
+    scrapeTimeout: 10s
+

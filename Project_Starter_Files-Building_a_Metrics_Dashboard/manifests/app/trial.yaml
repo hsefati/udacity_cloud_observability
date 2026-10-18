@@ -2,8 +2,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: trial-app
+  namespace: default
+  labels:
+    app: trial
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: trial
@@ -14,19 +17,30 @@ spec:
     spec:
       containers:
       - name: trial
-        # We advise you to build, push and use your own image, instead of using instructor's image.
-        image: ghcr.io/jasonsmithio/trial:v1
+        # Local image loaded into kind cluster
+        image: trial:v1
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: JAEGER_AGENT_HOST
+          value: "simplest-agent.observability.svc.cluster.local"
+        - name: JAEGER_AGENT_PORT
+          value: "6831"
         ports:
         - containerPort: 8080
+          name: web
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: trial-service
+  namespace: default
+  labels:
+    app: trial
 spec:
   selector:
     app: trial
   ports:
-    - port: 8082
+    - name: web
+      port: 8080
       targetPort: 8080
-  type: LoadBalancer
+  type: ClusterIP

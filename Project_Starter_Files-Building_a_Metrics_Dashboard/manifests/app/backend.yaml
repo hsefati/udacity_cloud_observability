@@ -2,8 +2,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: backend-app
+  namespace: default
+  labels:
+    app: backend
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: backend
@@ -14,19 +17,30 @@ spec:
     spec:
       containers:
       - name: backend
-        # We advise you to build, push and use your own image, instead of using instructor's image.      
-        image: ghcr.io/jasonsmithio/backend:v1
+        # Local image loaded into kind cluster
+        image: backend:v1
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: JAEGER_AGENT_HOST
+          value: "simplest-agent.observability.svc.cluster.local"
+        - name: JAEGER_AGENT_PORT
+          value: "6831"
         ports:
-        - containerPort: 8081
+        - containerPort: 8080
+          name: web
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: backend-service
+  namespace: default
+  labels:
+    app: backend
 spec:
   selector:
     app: backend
   ports:
-    - port: 8081
+    - name: web
+      port: 8080
       targetPort: 8080
-  type: LoadBalancer
+  type: ClusterIP

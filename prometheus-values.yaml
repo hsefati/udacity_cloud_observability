@@ -1,6 +1,18 @@
+# prometheus-values.yaml
+# Custom Helm values overriding defaults for kube-prometheus-stack
+
 grafana:
+  # Automatically provision additional data sources inside Grafana on startup
   additionalDataSources:
-  - name: Jaeger
-    type: jaeger
-    access: proxy
-    url: http://simplest-query.observability.svc.cluster.local:16686
+  - name: Jaeger                                                          # Display name in Grafana UI
+    type: jaeger                                                          # Data source plugin type
+    access: proxy                                                         # Proxy queries through Grafana backend
+    url: http://simplest-query.observability.svc.cluster.local:16686      # Cluster-internal DNS to Jaeger Query
+
+prometheus:
+  prometheusSpec:
+    # Setting these to false ensures Prometheus Operator scrapes ServiceMonitors
+    # and PodMonitors across ALL namespaces (not just the monitoring namespace).
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false

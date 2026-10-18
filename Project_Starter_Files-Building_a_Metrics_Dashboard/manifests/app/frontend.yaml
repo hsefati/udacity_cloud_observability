@@ -2,8 +2,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: frontend-app
+  namespace: default
+  labels:
+    app: frontend
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: frontend
@@ -14,19 +17,25 @@ spec:
     spec:
       containers:
       - name: frontend
-        # We advise you to build, push and use your own image, instead of using instructor's image.
-        image: ghcr.io/jasonsmithio/myfrontend:v1
+        # Local image loaded into kind cluster
+        image: frontend:v1
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
+          name: web
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: frontend-service
+  namespace: default
+  labels:
+    app: frontend
 spec:
   selector:
     app: frontend
   ports:
-    - port: 8080
+    - name: web
+      port: 8080
       targetPort: 8080
-  type: LoadBalancer
+  type: ClusterIP
