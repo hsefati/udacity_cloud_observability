@@ -76,37 +76,172 @@ Here are 5 key metrics to measure these SLIs:
    - **Prometheus Metric**: `sum(rate(flask_http_request_total[5m])) by (service)` 
 
 ## Create a Dashboard to measure our SLIs
-*TODO:* Create a dashboard to measure the uptime of the frontend and backend services We will also want to measure to measure 40x and 50x errors. Create a dashboard that show these values over a 24 hour period and take a screenshot.
+
+Dashboard created in Grafana measuring the uptime of frontend and backend services, alongside real-time 40x client errors and 50x server errors tracked over a 24-hour window:
+
+### SLI & Error Dashboard (24 Hours):
+![SLI Dashboard](answer-img/sli-dashboard.png)
 
 ## Tracing our Flask App
-*TODO:*  We will create a Jaeger span to measure the processes on the backend. Once you fill in the span, provide a screenshot of it here. Also provide a (screenshot) sample Python file containing a trace and span code used to perform Jaeger traces on the backend service.
+
+We instrumented the backend Flask service with the Jaeger Python client (`jaeger-client`) and OpenTracing (`FlaskTracing`) to measure and trace internal operations across routes:
+
+### Jaeger Trace Span for Backend Service:
+![Backend Trace Span](answer-img/backend-trace.png)
+
+### Sample Python Code for Tracing and Custom Spans (`backend/app.py`):
+```python
+import os
+import logging
+from flask import Flask, jsonify, request
+from jaeger_client import Config
+from flask_opentracing import FlaskTracing
+
+app = Flask(__name__)
+
+
+# Initialize Jaeger Tracer
+def init_tracer(service):
+    config = Config(
+        config={
+            "sampler": {"type": "const", "param": 1},
+            "logging": True,
+            "reporter_batch_size": 1,
+            "local_agent": {
+                "reporting_host": os.getenv("JAEGER_AGENT_HOST", "localhost"),
+                "reporting_port": int(os.getenv("JAEGER_AGENT_PORT", 6831)),
+            },
+        },
+        service_name=service,
+        validate=True,
+    )
+    return config.initialize_tracer()
+
+
+tracer = init_tracer("backend")
+flask_tracer = FlaskTracing(tracer, True, app)
+
+
+# Custom Trace Span Example on /api endpoint
+@app.route("/api")
+def my_api():
+    with tracer.start_span("api-processing") as span:
+        answer = "something"
+        span.set_tag("api.response", answer)
+        return jsonify(repsonse=answer)
+
+
+# Custom Trace Span Example with Database Operations
+@app.route("/star", methods=["POST"])
+def add_star():
+    with tracer.start_span("mongo-insert-star") as span:
+        star = mongo.db.stars
+        name = request.json["name"]
+        distance = request.json["distance"]
+        span.set_tag("star.name", name)
+        span.set_tag("star.distance", distance)
+
+        star_id = star.insert({"name": name, "distance": distance})
+        new_star = star.find_one({"_id": star_id})
+        output = {"name": new_star["name"], "distance": new_star["distance"]}
+        return jsonify({"result": output})
+```
 
 ## Jaeger in Dashboards
-*TODO:* Now that the trace is running, let's add the metric to our current Grafana dashboard. Once this is completed, provide a screenshot of it here.
+
+Jaeger tracing is integrated directly into Grafana using the pre-configured Jaeger data source (`http://simplest-query.observability.svc.cluster.local:16686`), allowing developers to query, inspect, and analyze distributed traces and latency spans within the Grafana interface:
+
+### Jaeger Traces Integrated in Grafana:
+![Jaeger in Grafana](answer-img/grafana-jaeger.png)
 
 ## Report Error
-*TODO:* Using the template below, write a trouble ticket for the developers, to explain the errors that you are seeing (400, 500, latency) and to let them know the file that is causing the issue also include a screenshot of the tracer span to demonstrate how we can user a tracer to locate errors easily.
 
-TROUBLE TICKET
+Using distributed tracing in Jaeger, we quickly located and diagnosed an unhandled HTTP 500 error on the `/trace` endpoint:
 
-Name:
+### Jaeger Tracer Error Span:
+![Tracer Error Span](answer-img/error-trace.png)
 
-Date:
+### TROUBLE TICKET
 
-Subject:
+**Name**: SRE / Observability Engineer  
+**Date**: October 19, 2026  
+**Subject**: HTTP 500 Internal Server Error & Failure on `/trace` Endpoint  
+**Affected Area**: Trial Service (`reference-app/trial/app.py`, endpoint `/trace`, span `get-python-jobs`)  
+**Severity**: High (Service endpoint unavailable / broken transaction)  
 
-Affected Area:
-
-Severity:
-
-Description:
+**Description**:
+- **Symptom**: Requests sent to `http://trial.local/trace` consistently return an HTTP 500 Internal Server Error with elevated response latency.
+- **Root Cause Identified via Jaeger**:
+  Inspection of the Jaeger distributed trace immediately pinpointed the root cause to the child span labeled **`get-python-jobs`**. In `reference-app/trial/app.py` (lines 60–64), the application performs a synchronous HTTP request:
+  ```python
+  res = requests.get("https://jobs.github.com/positions.json?description=python")
+  span.log_kv({"event": "get jobs count", "count": len(res.json())})
+  ```
+  The external endpoint `jobs.github.com` was decommissioned by GitHub and no longer serves JSON payloads. Consequently, `res.json()` fails with an uncaught `JSONDecodeError`, terminating the Flask request with an unhandled 500 error.
+- **Value of Tracing**:
+  The Jaeger tracer highlighted the failing sub-process in red, tagged the HTTP 500 status, and revealed that the failure was not in the database or server runtime, but in an external outbound HTTP dependency.
 
 
 ## Creating SLIs and SLOs
-*TODO:* We want to create an SLO guaranteeing that our application has a 99.95% uptime per month. Name four SLIs that you would use to measure the success of this SLO.
+
+To guarantee our application meets the **SLO of 99.95% monthly uptime** (which allows a maximum of **~21.6 minutes of downtime** or 5 failed requests per 10,000 requests in a 30-day month), we use the following four SLIs:
+
+1. **HTTP Success Rate SLI (Non-5xx Error Rate)**:
+   - **What it measures**: The percentage of incoming HTTP requests that return a successful status code (anything other than a 5xx server error).
+   - **Formula**:
+     $$\text{SLI}_1 = \frac{\text{Total Requests} - \text{HTTP 5xx Requests}}{\text{Total Requests}} \times 100\% \ge 99.95\%$$
+   - **Why it matters**: A direct measure of user success: whenever a 5xx error occurs, the user's transaction fails.
+
+2. **Pod Availability SLI (Kubernetes Health Probes)**:
+   - **What it measures**: The percentage of minutes in the month where at least one healthy, ready replica of each service (`frontend`, `backend`) is running and reachable by Prometheus.
+   - **Formula**:
+     $$\text{SLI}_2 = \frac{\text{Minutes where } \text{up} == 1}{\text{Total minutes in month (43,200 min)}} \times 100\% \ge 99.95\%$$
+   - **Why it matters**: Measures infrastructure availability. If all backend or frontend pods crash, 100% of user traffic is dropped.
+
+3. **Latency-Bounded Success SLI (Speed Quality)**:
+   - **What it measures**: The percentage of valid requests completed in under an acceptable latency threshold (e.g., $\le 500\text{ms}$).
+   - **Formula**:
+     $$\text{SLI}_3 = \frac{\text{Successful requests completed in } \le 500\text{ms}}{\text{Total Requests}} \times 100\% \ge 99.0\%$$
+   - **Why it matters**: A page that takes 30 seconds to load or times out feels completely down to the user, even if it eventually returns an HTTP 200.
+
+4. **Database Dependency SLI (MongoDB Query Success Rate)**:
+   - **What it measures**: The ratio of successful database operations (reads/writes on MongoDB `example-mongodb-svc`) compared to total attempted operations.
+   - **Formula**:
+     $$\text{SLI}_4 = \frac{\text{Successful MongoDB Read/Write Operations}}{\text{Total Attempted MongoDB Operations}} \times 100\% \ge 99.95\%$$
+   - **Why it matters**: The backend API depends directly on MongoDB for critical operations like `/star`. If the database fails, the backend immediately begins failing user requests.
+
+---
 
 ## Building KPIs for our plan
-*TODO*: Now that we have our SLIs and SLOs, create a list of 2-3 KPIs to accurately measure these metrics as well as a description of why those KPIs were chosen. We will make a dashboard for this, but first write them down here.
+
+To effectively track and protect our 99.95% monthly uptime SLO, we track the following 3 Key Performance Indicators (KPIs):
+
+1. **Error Budget Burn Rate (or Error Budget Remaining)**:
+   - **Description**: Tracks how quickly the allowed 0.05% monthly error budget is being consumed over time.
+   - **Why chosen**: A 99.95% SLO permits only 0.05% errors per month (~21.6 minutes of downtime). Rather than discovering a breached SLO at the end of the month, tracking the burn rate triggers automated alerts during sudden spikes, allowing engineers to mitigate issues before the monthly budget is exhausted.
+
+2. **Mean Time to Recovery (MTTR)**:
+   - **Description**: The average time elapsed from when an outage or performance degradation begins until service is fully restored.
+   - **Why chosen**: Outages are inevitable in complex systems. High uptime depends heavily on how rapidly the team detects an incident (via Prometheus alerts), isolates the root cause (using Jaeger distributed tracing), and resolves it. Keeping MTTR under 10 minutes ensures single incidents do not blow the monthly uptime SLO.
+
+3. **95th Percentile Response Latency (p95)**:
+   - **Description**: The maximum response time experienced by 95% of users (excluding the slowest 5% outliers).
+   - **Why chosen**: Average latency can be deceptive by hiding severe bottlenecks. Measuring p95 ensures that the vast majority of real users receive fast, responsive performance even during peak traffic loads.
+
+---
 
 ## Final Dashboard
-*TODO*: Create a Dashboard containing graphs that capture all the metrics of your KPIs and adequately representing your SLIs and SLOs. Include a screenshot of the dashboard here, and write a text description of what graphs are represented in the dashboard.  
+
+A comprehensive Grafana dashboard was created to capture all KPI and SLI metrics representing service health, error rates, throughput, and latency:
+
+### Final Observability Dashboard:
+![Final Dashboard](answer-img/sli-dashboard.png)
+
+### Description of Dashboard Panels:
+1. **Frontend Service Uptime (Stat Gauge)**: Displays real-time uptime percentage for the frontend UI service based on Prometheus health probes.
+2. **Backend Service Uptime (Stat Gauge)**: Displays real-time uptime percentage for the backend API service, verifying continuous container and pod availability.
+3. **Trial Service Uptime (Stat Gauge)**: Displays uptime for the testing sandbox service.
+4. **40x Client Error Rate (Time Series)**: Tracks the rate of 4xx errors (e.g. 404 Not Found) per second over time, alerting to broken frontend links or faulty client calls.
+5. **50x Server Error Rate (Time Series)**: Tracks the rate of 5xx errors (e.g. 500 Internal Server Error) per second, directly monitoring our availability SLI and error budget.
+6. **Request Latency p95 (Time Series)**: Graphs the 95th percentile latency in seconds across services to ensure requests respond within user satisfaction thresholds.
+7. **Total Requests by Service & Status (Time Series / Stacked Bars)**: Shows overall request traffic volume grouped by service name and HTTP response code, providing full operational visibility.  
